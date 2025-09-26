@@ -138,11 +138,11 @@ def get_song_videos(song_id, user_id, limit=10):
         cursor = conn.cursor()
         
         cursor.execute(
-            '''SELECT v.video_url, v.description, v.author_username, v.tiktok_created_at 
+            '''SELECT v.video_url, v.description, v.author_username, v.created_at 
                FROM videos v 
                JOIN songs s ON v.song_id = s.id 
                WHERE s.id = ? AND s.user_id = ? 
-               ORDER BY v.tiktok_created_at DESC 
+               ORDER BY v.created_at DESC 
                LIMIT ?''',
             (song_id, user_id, limit)
         )
@@ -154,6 +154,28 @@ def get_song_videos(song_id, user_id, limit=10):
     except Exception as e:
         logger.error(f"❌ Ошибка получения видео: {e}")
         return []
+
+def get_song_videos_count(song_id, user_id):
+    """Получение количества видео для песни"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            '''SELECT COUNT(*) 
+               FROM videos v 
+               JOIN songs s ON v.song_id = s.id 
+               WHERE s.id = ? AND s.user_id = ?''',
+            (song_id, user_id)
+        )
+        
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения количества видео: {e}")
+        return 0
 
 def delete_song(song_id, user_id):
     """Удаление песни"""
@@ -272,6 +294,8 @@ def extract_song_info_from_url(song_url):
                     song_name = re.sub(r'[-_]?\d+', '', raw_name)
                     song_name = re.sub(r'[-_]+', ' ', song_name)
                     song_name = song_name.strip().title()
+                    if not song_name:
+                        song_name = f"Песня {song_id}"
                 else:
                     song_name = f"Песня {song_id}"
                 
@@ -299,47 +323,70 @@ def get_tiktok_headers():
         'Sec-Fetch-User': '?1',
     }
 
-async def search_tiktok_videos(song_id, max_results=20):
-    """Поиск видео по ID песни в TikTok"""
+async def search_tiktok_videos(song_id, max_results=50):
+    """Поиск ВСЕХ видео по ID песни в TikTok"""
     videos = []
     
     try:
-        # Используем поиск TikTok по хештегу/названию песни
-        search_url = f"https://www.tiktok.com/search/video?q=music{song_id}"
+        logger.info(f"🔍 Начинаю поиск ВСЕХ видео для песни ID: {song_id}")
         
-        logger.info(f"🔍 Ищем видео для песни ID: {song_id}")
+        # Используем несколько стратегий поиска
+        search_urls = [
+            f"https://www.tiktok.com/search/video?q=music{song_id}",
+            f"https://www.tiktok.com/tag/music{song_id}",
+            f"https://www.tiktok.com/search/video?q=original_sound_{song_id}"
+        ]
         
-        response = requests.get(
-            search_url, 
-            headers=get_tiktok_headers(),
-            timeout=30
-        )
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+        for search_url in search_urls:
+            if len(videos) >= max_results:
+                break
+                
+            logger.info(f"🔍 Проверяю URL: {search_url}")
             
-            # Ищем видео в результатах поиска
-            video_elements = soup.find_all('div', {'data-e2e': 'search-card'})
-            
-            if not video_elements:
-                # Альтернативные селекторы
-                video_elements = soup.find_all('div', class_='tiktok-card')
-            
-            logger.info(f"📹 Найдено элементов: {len(video_elements)}")
-            
-            for element in video_elements[:max_results]:
-                try:
-                    video_data = extract_video_data(element)
-                    if video_data and not get_video_exists(video_data['url']):
-                        videos.append(video_data)
-                        
-                except Exception as e:
-                    logger.debug(f"Ошибка парсинга видео элемента: {e}")
-                    continue
+            try:
+                response = requests.get(
+                    search_url, 
+                    headers=get_tiktok_headers(),
+                    timeout=30
+                )
+                
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.text, 'html.parser')
                     
-        else:
-            logger.warning(f"❌ HTTP ошибка {response.status_code} для песни {song_id}")
-            
+                    # Ищем видео разными способами
+                    video_selectors = [
+                        'div[data-e2e="search-card"]',
+                        'div.tiktok-card',
+                        'div.video-item',
+                        'article'
+                    ]
+                    
+                    for selector in video_selectors:
+                        video_elements = soup.select(selector) if '[' in selector else soup.find_all(selector)
+                        if video_elements:
+                            logger.info(f"📹 Найдено элементов с селектором {selector}: {len(video_elements)}")
+                            
+                            for element in video_elements:
+                                if len(videos) >= max_results:
+                                    break
+                                    
+                                video_data = extract_video_data(element)
+                                if video_data:
+                                    # Проверяем дубликаты
+                                    if not any(v['url'] == video_data['url'] for v in videos):
+                                        videos.append(video_data)
+                            
+                            break  # Используем первый работающий селектор
+                    
+                    # Небольшая задержка между запросами
+                    await asyncio.sleep(1)
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка при проверке {search_url}: {e}")
+                continue
+        
+        logger.info(f"✅ Для песни {song_id} найдено {len(videos)} видео")
+        
     except Exception as e:
         logger.error(f"❌ Ошибка поиска видео: {e}")
     
@@ -399,14 +446,17 @@ def extract_video_data(element):
         logger.debug(f"Ошибка извлечения данных видео: {e}")
         return None
 
-async def process_song_link(user_id, song_url):
-    """Обработка ссылки на песню"""
+async def process_song_link(user_id, song_url, progress_callback=None):
+    """Обработка ссылки на песню - с поиском ВСЕХ существующих видео"""
     try:
         # Проверяем валидность ссылки
         if not any(domain in song_url for domain in ['tiktok.com', 'vm.tiktok.com']):
             return False, "❌ Неверный формат ссылки. Используйте ссылку на песню из TikTok."
         
         # Извлекаем информацию о песне
+        if progress_callback:
+            await progress_callback("🔍 Извлекаю информацию о песне из ссылки...")
+        
         song_name, song_id = extract_song_info_from_url(song_url)
         if not song_name or not song_id:
             return False, "❌ Не удалось распознать песню из ссылки. Проверьте формат ссылки."
@@ -417,23 +467,38 @@ async def process_song_link(user_id, song_url):
         if not is_new:
             return False, "❌ Эта песня уже добавлена для отслеживания."
         
-        # Ищем видео для этой песни
-        videos = await search_tiktok_videos(song_id)
+        # 🔍 НАХОДИМ ВСЕ СУЩЕСТВУЮЩИЕ ВИДЕО ПРИ ДОБАВЛЕНИИ
+        if progress_callback:
+            await progress_callback("🔍 Ищу все существующие видео... Это может занять время.")
+        
+        videos = await search_tiktok_videos(song_id, max_results=50)
+        
+        if progress_callback:
+            await progress_callback(f"📹 Найдено {len(videos)} видео. Сохраняю в базу...")
         
         # Сохраняем найденные видео
-        for video in videos:
-            add_video(song_db_id, video)
+        saved_count = 0
+        for i, video in enumerate(videos):
+            if add_video(song_db_id, video):
+                saved_count += 1
+            
+            # Обновляем прогресс каждые 10 видео
+            if progress_callback and i % 10 == 0:
+                await progress_callback(f"📹 Сохранено {saved_count} из {len(videos)} видео...")
         
         update_song_last_checked(song_db_id)
         
-        return True, f"✅ Песня '{song_name}' добавлена! Найдено {len(videos)} видео."
+        if saved_count > 0:
+            return True, f"✅ Песня '{song_name}' добавлена!\n\n📊 Найдено и сохранено {saved_count} существующих видео.\n\nТеперь я буду присылать уведомления только о новых видео!"
+        else:
+            return True, f"✅ Песня '{song_name}' добавлена!\n\n📭 Пока видео не найдено, но я буду проверять новые!\n\nПопробуйте нажать '🔍 Проверить сейчас' для поиска."
         
     except Exception as e:
         logger.error(f"❌ Ошибка обработки ссылки: {e}")
         return False, "❌ Произошла ошибка при обработке ссылки."
 
 async def check_new_videos_for_user(user_id):
-    """Проверка новых видео для пользователя"""
+    """Проверка только НОВЫХ видео для пользователя"""
     new_videos = []
     
     try:
@@ -442,9 +507,9 @@ async def check_new_videos_for_user(user_id):
         for song in songs:
             song_db_id, name, song_url, song_id, created_at, last_checked = song
             
-            logger.info(f"🔍 Проверяем песню: {name} (ID: {song_id})")
+            logger.info(f"🔍 Проверяем новые видео для песни: {name} (ID: {song_id})")
             
-            videos = await search_tiktok_videos(song_id)
+            videos = await search_tiktok_videos(song_id, max_results=20)
             
             for video in videos:
                 if not get_video_exists(video['url']):
@@ -463,6 +528,27 @@ async def check_new_videos_for_user(user_id):
         logger.error(f"❌ Ошибка проверки видео для пользователя {user_id}: {e}")
     
     return new_videos
+
+async def search_more_videos_for_song(song_id, song_name, user_id):
+    """Поиск дополнительных видео для конкретной песни"""
+    try:
+        logger.info(f"🔍 Дополнительный поиск видео для песни: {song_name}")
+        
+        videos = await search_tiktok_videos(song_id, max_results=30)
+        
+        new_videos_count = 0
+        for video in videos:
+            if not get_video_exists(video['url']):
+                if add_video(song_id, video):
+                    new_videos_count += 1
+        
+        update_song_last_checked(song_id)
+        
+        return new_videos_count
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка дополнительного поиска видео: {e}")
+        return 0
 
 # ========== ОБРАБОТЧИКИ БОТА ==========
 
@@ -490,6 +576,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 🎵 Я бот для отслеживания новых видео с твоими песнями в TikTok.
 
 ✅ Режим: РЕАЛЬНЫЙ ПАРСИНГ
+
+🌟 Особенности:
+- При добавлении песни нахожу ВСЕ существующие видео
+- Сохраняю их, чтобы не присылать как "новые"
+- Отслеживаю только действительно НОВЫЕ видео
+- Автоматическая проверка каждые 30 минут
 
 📱 Используй кнопки ниже для управления:
     """
@@ -522,6 +614,10 @@ async def handle_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await delete_song_handler(update, context)
         elif data.startswith("show_videos:"):
             await show_videos_handler(update, context)
+        elif data.startswith("search_more:"):
+            await search_more_handler(update, context)
+        elif data.startswith("check_song:"):
+            await check_song_handler(update, context)
         elif data == "back_to_songs":
             await list_songs_handler(update, context)
             
@@ -545,12 +641,13 @@ async def add_song_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • https://www.tiktok.com/music/название-песни-723415689123
 • https://vm.tiktok.com/music/песня-123456789
 
-Бот найдет все видео с этой песней!"""
+🌟 Бот найдет ВСЕ существующие видео с этой песней и сохранит их!
+После этого будет присылать уведомления только о новых видео."""
     
     await update.callback_query.message.edit_text(text, reply_markup=keyboard)
 
 async def list_songs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Список песен"""
+    """Список песен с количеством видео"""
     try:
         user_id = update.effective_user.id
         songs = get_user_songs(user_id)
@@ -568,12 +665,19 @@ async def list_songs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         for song in songs:
             song_id, name, song_url, song_id_str, created_at, last_checked = song
+            
+            # Получаем количество видео для песни
+            videos_count = get_song_videos_count(song_id, user_id)
+            
             text += f"🎵 {name}\n"
-            text += f"🆔 ID: {song_id_str}\n"
+            text += f"📊 Видео: {videos_count} | 🆔 ID: {song_id_str}\n"
             text += f"📅 Добавлена: {created_at[:10]}\n\n"
             
             keyboard_buttons.append([
-                InlineKeyboardButton(f"📹 Видео {name}", callback_data=f"show_videos:{song_id}"),
+                InlineKeyboardButton(f"📹 Видео ({videos_count})", callback_data=f"show_videos:{song_id}"),
+                InlineKeyboardButton(f"🔍 Искать ещё", callback_data=f"search_more:{song_id}")
+            ])
+            keyboard_buttons.append([
                 InlineKeyboardButton(f"❌ Удалить", callback_data=f"delete_song:{song_id}")
             ])
         
@@ -586,28 +690,44 @@ async def list_songs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"❌ Ошибка показа списка песен: {e}")
 
 async def show_videos_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показать видео"""
+    """Показать видео с информацией"""
     try:
         query = update.callback_query
         song_id = int(query.data.split(":")[1])
         user_id = update.effective_user.id
         
-        videos = get_song_videos(song_id, user_id, limit=8)
+        videos = get_song_videos(song_id, user_id, limit=10)
+        total_count = get_song_videos_count(song_id, user_id)
+        
+        # Получаем информацию о песне
+        songs = get_user_songs(user_id)
+        song_info = next((s for s in songs if s[0] == song_id), None)
+        
+        if not song_info:
+            await query.edit_message_text("❌ Ошибка: песня не найдена")
+            return
+            
+        song_name = song_info[1]
         
         if not videos:
-            text = "📭 Видео для этой песни пока не найдено.\n\nПопробуйте проверить позже или нажать 'Проверить сейчас'."
+            text = f"🎵 **{song_name}**\n📊 Всего видео: 0\n\n📭 Видео пока не найдено.\n\nНажмите '🔍 Искать видео' для поиска."
         else:
-            text = f"🎬 Найдено {len(videos)} видео:\n\n"
+            text = f"🎵 **{song_name}**\n📊 Всего видео: {total_count}\n\n**Последние видео:**\n\n"
+            
             for i, video in enumerate(videos, 1):
                 video_url, description, author, created_at = video
                 text += f"**{i}. {description}**\n"
                 text += f"👤 Автор: {author or 'Неизвестен'}\n"
                 text += f"🔗 [Смотреть видео]({video_url})\n"
-                text += f"⏰ {created_at[:10] if created_at else 'Недавно'}\n\n"
+                text += f"⏰ Добавлено: {created_at[:16] if created_at else 'Недавно'}\n\n"
+            
+            if total_count > 10:
+                text += f"*... и ещё {total_count - 10} видео*"
         
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Проверить сейчас", callback_data=f"check_song:{song_id}")],
-            [InlineKeyboardButton("↩️ К списку песен", callback_data="list_songs")],
+            [InlineKeyboardButton("🔍 Искать ещё видео", callback_data=f"search_more:{song_id}")],
+            [InlineKeyboardButton("🔄 Проверить новые", callback_data=f"check_song:{song_id}")],
+            [InlineKeyboardButton("📋 К списку песен", callback_data="list_songs")],
             [InlineKeyboardButton("↩️ В главное меню", callback_data="main_menu")]
         ])
         
@@ -616,12 +736,113 @@ async def show_videos_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     except Exception as e:
         logger.error(f"❌ Ошибка показа видео: {e}")
 
+async def search_more_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Поиск дополнительных видео для песни"""
+    try:
+        query = update.callback_query
+        song_id = int(query.data.split(":")[1])
+        user_id = update.effective_user.id
+        
+        # Получаем информацию о песне
+        songs = get_user_songs(user_id)
+        song_info = next((s for s in songs if s[0] == song_id), None)
+        
+        if not song_info:
+            await query.edit_message_text("❌ Ошибка: песня не найдена")
+            return
+            
+        song_name = song_info[1]
+        song_id_str = song_info[3]
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Обновить", callback_data=f"search_more:{song_id}")],
+            [InlineKeyboardButton("↩️ Назад", callback_data=f"show_videos:{song_id}")]
+        ])
+        
+        await query.edit_message_text(f"🔍 Ищу дополнительные видео для '{song_name}'...", reply_markup=keyboard)
+        
+        # Ищем дополнительные видео
+        new_videos_count = await search_more_videos_for_song(song_id, song_id_str, user_id)
+        
+        if new_videos_count > 0:
+            text = f"✅ Для песни '{song_name}' найдено {new_videos_count} новых видео!"
+        else:
+            text = f"📭 Для песни '{song_name'} новых видео не найдено."
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📹 Смотреть видео", callback_data=f"show_videos:{song_id}")],
+            [InlineKeyboardButton("📋 К списку песен", callback_data="list_songs")],
+            [InlineKeyboardButton("↩️ В главное меню", callback_data="main_menu")]
+        ])
+        
+        await query.edit_message_text(text, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка поиска дополнительных видео: {e}")
+
+async def check_song_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка новых видео для конкретной песни"""
+    try:
+        query = update.callback_query
+        song_id = int(query.data.split(":")[1])
+        user_id = update.effective_user.id
+        
+        # Получаем информацию о песне
+        songs = get_user_songs(user_id)
+        song_info = next((s for s in songs if s[0] == song_id), None)
+        
+        if not song_info:
+            await query.edit_message_text("❌ Ошибка: песня не найдена")
+            return
+            
+        song_name = song_info[1]
+        song_id_str = song_info[3]
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Обновить", callback_data=f"check_song:{song_id}")],
+            [InlineKeyboardButton("↩️ Назад", callback_data=f"show_videos:{song_id}")]
+        ])
+        
+        await query.edit_message_text(f"🔍 Проверяю новые видео для '{song_name}'...", reply_markup=keyboard)
+        
+        # Ищем новые видео
+        videos = await search_tiktok_videos(song_id_str, max_results=20)
+        
+        new_videos_count = 0
+        for video in videos:
+            if not get_video_exists(video['url']):
+                if add_video(song_id, video):
+                    new_videos_count += 1
+        
+        update_song_last_checked(song_id)
+        
+        if new_videos_count > 0:
+            text = f"🎉 Для песни '{song_name}' найдено {new_videos_count} новых видео!"
+        else:
+            text = f"📭 Для песни '{song_name'} новых видео не найдено."
+        
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📹 Смотреть видео", callback_data=f"show_videos:{song_id}")],
+            [InlineKeyboardButton("📋 К списку песен", callback_data="list_songs")],
+            [InlineKeyboardButton("↩️ В главное меню", callback_data="main_menu")]
+        ])
+        
+        await query.edit_message_text(text, reply_markup=keyboard)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки видео: {e}")
+
 async def delete_song_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Удаление песни"""
     try:
         query = update.callback_query
         song_id = int(query.data.split(":")[1])
         user_id = update.effective_user.id
+        
+        # Получаем информацию о песне для сообщения
+        songs = get_user_songs(user_id)
+        song_info = next((s for s in songs if s[0] == song_id), None)
+        song_name = song_info[1] if song_info else "Неизвестная песня"
         
         delete_song(song_id, user_id)
         
@@ -630,13 +851,13 @@ async def delete_song_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             [InlineKeyboardButton("↩️ В главное меню", callback_data="main_menu")]
         ])
         
-        await query.edit_message_text("✅ Песня успешно удалена!", reply_markup=keyboard)
+        await query.edit_message_text(f"✅ Песня '{song_name}' успешно удалена!", reply_markup=keyboard)
         
     except Exception as e:
         logger.error(f"❌ Ошибка удаления песни: {e}")
 
 async def check_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка видео"""
+    """Проверка новых видео для всех песен пользователя"""
     try:
         query = update.callback_query
         user_id = update.effective_user.id
@@ -646,7 +867,7 @@ async def check_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("↩️ Назад", callback_data="main_menu")]
         ])
         
-        await query.edit_message_text("🔍 Ищу новые видео... Это может занять несколько секунд.", reply_markup=keyboard)
+        await query.edit_message_text("🔍 Ищу новые видео для всех песен... Это может занять несколько секунд.", reply_markup=keyboard)
         
         new_videos = await check_new_videos_for_user(user_id)
         
@@ -657,7 +878,7 @@ async def check_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i, video in enumerate(new_videos[:5], 1):
                 text += f"**{i}. {video['song_name']}**\n"
                 text += f"📹 {video['description']}\n"
-                text += f"👤 {video.get('author', 'Неизвестный автор')}\n"
+                                text += f"👤 {video.get('author', 'Неизвестный автор')}\n"
                 text += f"🔗 [Смотреть видео]({video['video_url']})\n\n"
             
             if len(new_videos) > 5:
@@ -679,15 +900,20 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 3. Пришли ссылку боту
 
 🔍 *Что делает бот*:
-- Находит ВСЕ видео с этой песней
-- Сортирует по дате публикации
-- Присылает уведомления о новых видео
-- Работает в реальном времени
+- При добавлении находит ВСЕ существующие видео
+- Сохраняет их, чтобы не дублировать уведомления
+- Отслеживает только НОВЫЕ видео
+- Автоматическая проверка каждые 30 минут
+
+📊 *Управление песнями*:
+- 📹 Видео - просмотр всех найденных видео
+- 🔍 Искать ещё - поиск дополнительных видео
+- 🔄 Проверить новые - проверка только новых видео
 
 💡 *Советы*:
 - Используй официальные ссылки из TikTok
+- При добавлении бот найдет всю историю видео
 - Чем популярнее песня, тем больше видео найдется
-- Новые видео проверяются каждые 30 минут
 
 ⚠️ *Ограничения*:
 - TikTok может блокировать частые запросы
@@ -717,14 +943,31 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.error(f"❌ Ошибка обработки текста: {e}")
 
 async def handle_song_link(update: Update, context: ContextTypes.DEFAULT_TYPE, link: str):
-    """Обработчик ссылки на песню"""
+    """Обработчик ссылки на песню с прогресс-баром"""
     try:
-        await update.message.reply_text("🔍 Обрабатываю ссылку на песню...")
+        # Отправляем начальное сообщение
+        progress_message = await update.message.reply_text("🔍 Начинаю обработку ссылки...")
         
-        success, message = await process_song_link(update.effective_user.id, link)
+        async def update_progress(text):
+            """Функция для обновления прогресса"""
+            try:
+                await progress_message.edit_text(text)
+            except Exception as e:
+                logger.debug(f"Ошибка обновления прогресса: {e}")
         
+        # Обрабатываем ссылку с прогрессом
+        success, result_message = await process_song_link(
+            update.effective_user.id, 
+            link, 
+            progress_callback=update_progress
+        )
+        
+        # Показываем финальный результат
         keyboard = get_main_keyboard()
-        await update.message.reply_text(message, reply_markup=keyboard)
+        if success:
+            await progress_message.edit_text(result_message, reply_markup=keyboard, parse_mode='Markdown')
+        else:
+            await progress_message.edit_text(result_message, reply_markup=keyboard)
             
     except Exception as e:
         logger.error(f"❌ Ошибка обработки ссылки: {e}")
@@ -737,8 +980,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ========== ПЕРИОДИЧЕСКАЯ ПРОВЕРКА ==========
 
 async def periodic_check(context):
-    """Периодическая проверка новых видео"""
-    logger.info("🔍 Запуск автоматической проверки видео...")
+    """Периодическая проверка только НОВЫХ видео"""
+    logger.info("🔍 Запуск автоматической проверки НОВЫХ видео...")
     
     try:
         songs = get_all_songs_for_checking()
@@ -747,12 +990,13 @@ async def periodic_check(context):
         for song in songs:
             song_id, user_id, name, song_url, song_id_str = song
             
-            logger.info(f"🔍 Проверяем песню: {name}")
+            logger.info(f"🔍 Проверяем новые видео для песни: {name}")
             
-            videos = await search_tiktok_videos(song_id_str)
+            videos = await search_tiktok_videos(song_id_str, max_results=20)
             new_videos_count = 0
             
             for video in videos:
+                # Проверяем, что видео новое (еще не в базе)
                 if not get_video_exists(video['url']):
                     if add_video(song_id, video):
                         new_videos_count += 1
@@ -835,6 +1079,7 @@ def main():
             
             # Запуск
             logger.info("✅ Бот запущен успешно! Режим: РЕАЛЬНЫЙ ПАРСИНГ")
+            logger.info("🌟 Особенности: Поиск ВСЕХ видео при добавлении песни")
             application.run_polling()
             break
             
