@@ -1,0 +1,9 @@
+.env
+*.db
+*.sqlite3
+__pycache__/
+*.pyc
+*.pyo
+database/
+venv/
+.env.production
