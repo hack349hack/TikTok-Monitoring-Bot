@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  tiktok-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tiktok-monitor-bot-prod
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHECK_INTERVAL=1800
+    volumes:
+      - tiktok_data:/app/database
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  tiktok_data:
