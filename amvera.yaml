@@ -1,0 +1,19 @@
+name: tiktok-monitor-bot
+platform: docker
+version: 1
+
+services:
+  bot:
+    type: worker
+    image: ${AMVERA_REGISTRY_URL}/tiktok-monitor-bot:latest
+    resources:
+      memory: 512Mi
+      cpu: 100m
+    env:
+      - name: BOT_TOKEN
+        value: ${BOT_TOKEN}
+      - name: CHECK_INTERVAL
+        value: "1800"
+    scaling:
+      min: 1
+      max: 1
