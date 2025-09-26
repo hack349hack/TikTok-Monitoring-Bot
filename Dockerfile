@@ -5,14 +5,18 @@ WORKDIR /app
 # Установка системных зависимостей
 RUN apt-get update && apt-get install -y \
     gcc \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
+
+# Сначала копируем requirements.txt для кэширования зависимостей
+COPY requirements.txt .
+
+# Устанавливаем зависимости
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Создание директории для базы данных
 RUN mkdir -p /app/database
-
-# Копирование requirements
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
 # Копирование исходного кода
 COPY . .
