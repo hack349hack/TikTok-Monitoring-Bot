@@ -17,3 +17,10 @@ services:
     scaling:
       min: 1
       max: 1
+
+build:
+  - name: Build Docker image
+    type: docker
+    image: ${AMVERA_REGISTRY_URL}/tiktok-monitor-bot:${CI_COMMIT_SHA}
+    context: .
+    dockerfile: Dockerfile
