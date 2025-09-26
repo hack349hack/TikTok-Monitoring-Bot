@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  tiktok-bot:
+    build: .
+    container_name: tiktok-monitor-bot
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - CHECK_INTERVAL=300
+    volumes:
+      - ./database:/app/database
+    restart: unless-stopped
