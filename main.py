@@ -767,7 +767,7 @@ async def search_more_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         if new_videos_count > 0:
             text = f"✅ Для песни '{song_name}' найдено {new_videos_count} новых видео!"
         else:
-            text = f"📭 Для песни '{song_name'} новых видео не найдено."
+            text = f"📭 Для песни '{song_name}' новых видео не найдено."
         
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("📹 Смотреть видео", callback_data=f"show_videos:{song_id}")],
