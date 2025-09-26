@@ -12,10 +12,14 @@ RUN mkdir -p /app/database
 
 # Копирование requirements
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Копирование исходного кода
 COPY . .
 
+# Создание пользователя для безопасности
+RUN useradd -m -u 1000 botuser && chown -R botuser:botuser /app
+USER botuser
+
 # Запуск бота
-CMD ["python", "-m", "bot.main"]
+CMD ["python", "main.py"]
