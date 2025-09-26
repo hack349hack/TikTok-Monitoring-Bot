@@ -1,0 +1,39 @@
+name: Deploy to Amvera
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Amvera Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ secrets.AMVERA_REGISTRY_URL }}
+        username: ${{ secrets.AMVERA_ACCESS_KEY }}
+        password: ${{ secrets.AMVERA_SECRET_KEY }}
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          ${{ secrets.AMVERA_REGISTRY_URL }}/tiktok-monitor-bot:${{ github.sha }}
+          ${{ secrets.AMVERA_REGISTRY_URL }}/tiktok-monitor-bot:latest
+        cache-from: type=registry,ref=${{ secrets.AMVERA_REGISTRY_URL }}/tiktok-monitor-bot:latest
+        cache-to: type=inline
+
+    - name: Notify deployment
+      run: |
+        echo "Деплой завершен. Образ: ${{ secrets.AMVERA_REGISTRY_URL }}/tiktok-monitor-bot:${{ github.sha }}"
+        echo "Обновите сервис в Amvera Console для применения изменений"
