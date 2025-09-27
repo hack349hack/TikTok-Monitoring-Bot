@@ -270,30 +270,29 @@ def get_all_songs_for_checking():
         logger.error(f"❌ Ошибка получения песен для проверки: {e}")
         return []
 
-# ========== ПАРСИНГ TIKTOK ==========
+# ========== РЕАЛЬНЫЙ ПАРСИНГ TIKTOK ==========
 
 def extract_song_info_from_url(song_url):
     """Извлечение информации о песне из URL"""
     try:
         # Разные форматы ссылок TikTok
         patterns = [
-            r'music/[^/]+?-(\d+)',  # music/song-name-123456789
-            r'music/[^/]+?--(\d+)', # music/song-name--123456789
-            r'music/[^/]+?[_-](\d+)' # music/song-name_123456789
+            r'music/[^/]+?-(\d+)',
+            r'music/[^/]+?--(\d+)', 
+            r'music/[^/]+?[_-](\d+)',
+            r'music/[^/?]+[?&]id=(\d+)'
         ]
         
         for pattern in patterns:
             match = re.search(pattern, song_url)
             if match:
                 song_id = match.group(1)
-                # Извлекаем название из URL
+                # Извлекаем название
                 name_match = re.search(r'music/([^/?]+)', song_url)
                 if name_match:
                     raw_name = name_match.group(1)
-                    # Очищаем название от ID и специальных символов
                     song_name = re.sub(r'[-_]?\d+', '', raw_name)
-                    song_name = re.sub(r'[-_]+', ' ', song_name)
-                    song_name = song_name.strip().title()
+                    song_name = re.sub(r'[-_]+', ' ', song_name).strip().title()
                     if not song_name:
                         song_name = f"Песня {song_id}"
                 else:
@@ -308,10 +307,10 @@ def extract_song_info_from_url(song_url):
         return None, None
 
 def get_tiktok_headers():
-    """Заголовки для запросов к TikTok"""
+    """Современные заголовки для обхода защиты TikTok"""
     return {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
         'Accept-Encoding': 'gzip, deflate, br',
         'Referer': 'https://www.tiktok.com/',
@@ -322,300 +321,356 @@ def get_tiktok_headers():
         'Sec-Fetch-Mode': 'navigate',
         'Sec-Fetch-Site': 'same-origin',
         'Sec-Fetch-User': '?1',
+        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
     }
 
-async def parse_song_page(song_url, max_results=100):
-    """Парсинг страницы песни и извлечение видео"""
+async def make_tiktok_request(url, max_retries=3):
+    """Безопасный запрос к TikTok с повторными попытками"""
+    for attempt in range(max_retries):
+        try:
+            headers = get_tiktok_headers()
+            # Добавляем случайную задержку
+            await asyncio.sleep(attempt * 2)
+            
+            response = requests.get(url, headers=headers, timeout=15)
+            
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 403:
+                logger.warning(f"⚠️ Доступ запрещен (403). Попытка {attempt + 1}")
+                # Меняем User-Agent
+                headers['User-Agent'] = f'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/12{attempt}.0.0.0 Safari/537.36'
+            elif response.status_code == 429:
+                logger.warning(f"⚠️ Слишком много запросов (429). Пауза...")
+                await asyncio.sleep(10)
+                
+        except requests.RequestException as e:
+            logger.warning(f"⚠️ Ошибка запроса (попытка {attempt + 1}): {e}")
+    
+    return None
+
+async def parse_tiktok_api(song_id, max_results=50):
+    """Парсинг через неофициальное API TikTok"""
     videos = []
     
     try:
-        logger.info(f"🔍 Парсим страницу песни: {song_url}")
+        logger.info(f"🔍 Парсим через API для песни ID: {song_id}")
         
-        headers = get_tiktok_headers()
-        response = requests.get(song_url, headers=headers, timeout=30)
+        # Популярные эндпоинты для поиска видео по звуку
+        api_endpoints = [
+            f"https://www.tiktok.com/api/music/item_list/?musicId={song_id}&count=30",
+            f"https://www.tiktok.com/api/sound/item_list/?soundId={song_id}&count=30",
+            f"https://www.tiktok.com/node/share/music/{song_id}",
+        ]
         
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
+        for endpoint in api_endpoints:
+            if len(videos) >= max_results:
+                break
+                
+            logger.info(f"🔧 Пробуем endpoint: {endpoint}")
+            response = await make_tiktok_request(endpoint)
             
-            # Ищем все ссылки на видео и фото
-            video_links = []
-            
-            # Ищем ссылки в различных форматах
-            link_patterns = [
-                r'https://www\.tiktok\.com/@[^/]+/(video|photo)/\d+',
-                r'https://vm\.tiktok\.com/[^\s"\']+',
-                r'href="(/@[^/]+/(video|photo)/\d+)"'
-            ]
-            
-            # Ищем в тексте страницы
-            page_text = response.text
-            for pattern in link_patterns:
-                matches = re.findall(pattern, page_text)
-                for match in matches:
-                    if isinstance(match, tuple):
-                        link_part = match[0]
-                    else:
-                        link_part = match
-                    
-                    # Формируем полную ссылку
-                    if link_part.startswith('/'):
-                        full_url = f"https://www.tiktok.com{link_part}"
-                    elif link_part.startswith('https://vm.tiktok.com'):
-                        full_url = link_part
-                    else:
-                        full_url = link_part
-                    
-                    if full_url not in video_links:
-                        video_links.append(full_url)
-            
-            # Также ищем через BeautifulSoup
-            for a_tag in soup.find_all('a', href=True):
-                href = a_tag['href']
-                if '/video/' in href or '/photo/' in href:
-                    if href.startswith('/'):
-                        full_url = f"https://www.tiktok.com{href}"
-                    else:
-                        full_url = href
-                    
-                    if full_url not in video_links:
-                        video_links.append(full_url)
-            
-            logger.info(f"📹 Найдено ссылок на странице: {len(video_links)}")
-            
-            # Обрабатываем найденные ссылки
-            for i, video_url in enumerate(video_links[:max_results]):
+            if response and response.status_code == 200:
                 try:
-                    video_data = await extract_video_info(video_url)
-                    if video_data:
-                        videos.append(video_data)
-                        logger.info(f"✅ Обработано видео {i+1}/{min(len(video_links), max_results)}")
-                except Exception as e:
-                    logger.debug(f"⚠️ Ошибка обработки видео {video_url}: {e}")
-                    continue
-                    
-        else:
-            logger.warning(f"❌ HTTP ошибка {response.status_code} для страницы песни")
+                    data = response.json()
+                    videos.extend(extract_videos_from_api_data(data, song_id))
+                    logger.info(f"✅ Из endpoint получено видео: {len(videos)}")
+                except json.JSONDecodeError:
+                    # Пробуем парсить HTML если JSON не валидный
+                    videos.extend(await parse_html_for_videos(response.text, song_id))
             
+            await asyncio.sleep(2)  # Пауза между запросами
+        
     except Exception as e:
-        logger.error(f"❌ Ошибка парсинга страницы песни: {e}")
+        logger.error(f"❌ Ошибка парсинга API: {e}")
+    
+    return videos[:max_results]
+
+def extract_videos_from_api_data(data, song_id):
+    """Извлечение видео из данных API"""
+    videos = []
+    
+    try:
+        # Разные структуры ответа API
+        if 'itemList' in data:
+            items = data['itemList']
+        elif 'items' in data:
+            items = data['items']
+        elif 'body' in data and 'itemListData' in data['body']:
+            items = data['body']['itemListData']
+        else:
+            # Пробуем найти видео в любой структуре
+            items = find_videos_in_json(data)
+        
+        for item in items[:30]:  # Ограничиваем количество
+            try:
+                video_info = extract_video_info_from_item(item)
+                if video_info:
+                    videos.append(video_info)
+            except Exception as e:
+                logger.debug(f"⚠️ Ошибка обработки элемента: {e}")
+                continue
+                
+    except Exception as e:
+        logger.error(f"❌ Ошибка извлечения данных API: {e}")
     
     return videos
 
-async def extract_video_info(video_url):
-    """Извлечение информации о конкретном видео"""
+def find_videos_in_json(data):
+    """Рекурсивный поиск видео в JSON структуре"""
+    videos = []
+    
+    def search_recursive(obj):
+        if isinstance(obj, dict):
+            # Проверяем, есть ли признаки видео
+            if any(key in obj for key in ['video', 'itemId', 'id', 'videoUrl']):
+                videos.append(obj)
+            for value in obj.values():
+                search_recursive(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                search_recursive(item)
+    
+    search_recursive(data)
+    return videos
+
+def extract_video_info_from_item(item):
+    """Извлечение информации о видео из элемента API"""
     try:
-        # Если это короткая ссылка vm.tiktok.com, получаем полную
-        if video_url.startswith('https://vm.tiktok.com'):
-            video_url = await resolve_short_url(video_url)
-            if not video_url:
-                return None
+        # Разные форматы данных TikTok
+        video_data = {}
         
-        # Парсим информацию из URL
-        video_match = re.search(r'https://www\.tiktok\.com/@([^/]+)/(video|photo)/(\d+)', video_url)
-        if not video_match:
+        # ID видео
+        if 'id' in item:
+            video_id = item['id']
+        elif 'itemId' in item:
+            video_id = item['itemId']
+        elif 'video' in item and 'id' in item['video']:
+            video_id = item['video']['id']
+        else:
             return None
-            
-        username = video_match.group(1)
-        content_type = video_match.group(2)
-        video_id = video_match.group(3)
+        
+        # URL видео
+        if 'video' in item and 'downloadAddr' in item['video']:
+            video_url = item['video']['downloadAddr']
+        elif 'videoUrl' in item:
+            video_url = item['videoUrl']
+        else:
+            video_url = f"https://www.tiktok.com/@user/video/{video_id}"
+        
+        # Описание
+        if 'desc' in item:
+            description = item['desc']
+        elif 'description' in item:
+            description = item['description']
+        elif 'content' in item:
+            description = item['content']
+        else:
+            description = f"Видео {video_id}"
+        
+        if len(description) > 200:
+            description = description[:200] + '...'
+        
+        # Автор
+        author_username = "unknown"
+        author_name = "Неизвестный автор"
+        
+        if 'author' in item:
+            author = item['author']
+            if 'uniqueId' in author:
+                author_username = author['uniqueId']
+            if 'nickname' in author:
+                author_name = author['nickname']
         
         video_data = {
             'url': video_url,
-            'author_username': username,
+            'description': description,
+            'author_username': author_username,
+            'author_name': author_name,
             'video_id': video_id,
-            'content_type': content_type,
-            'description': f"Видео от @{username}",
             'created_at': datetime.now()
         }
-        
-        # Пытаемся получить больше информации о видео
-        try:
-            headers = get_tiktok_headers()
-            response = requests.get(video_url, headers=headers, timeout=15)
-            
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                
-                # Ищем описание видео
-                title_tag = soup.find('title')
-                if title_tag:
-                    description = title_tag.get_text()
-                    if ' | TikTok' in description:
-                        description = description.replace(' | TikTok', '')
-                    if len(description) > 200:
-                        description = description[:200] + '...'
-                    video_data['description'] = description
-                
-                # Ищем имя автора
-                author_elem = soup.find('a', href=re.compile(f'/@{username}'))
-                if author_elem:
-                    author_name = author_elem.get_text(strip=True)
-                    if author_name and author_name != f'@{username}':
-                        video_data['author_name'] = author_name
-                
-        except Exception as e:
-            logger.debug(f"⚠️ Не удалось получить детали видео {video_url}: {e}")
         
         return video_data
         
     except Exception as e:
-        logger.error(f"❌ Ошибка извлечения информации о видео: {e}")
+        logger.debug(f"⚠️ Ошибка извлечения информации видео: {e}")
         return None
 
-async def resolve_short_url(short_url):
-    """Разрешение коротких ссылок vm.tiktok.com"""
-    try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        }
-        
-        response = requests.get(short_url, headers=headers, timeout=10, allow_redirects=False)
-        
-        if response.status_code in [301, 302]:
-            return response.headers.get('Location', short_url)
-        else:
-            # Пробуем получить финальный URL с разрешением редиректов
-            response_final = requests.get(short_url, headers=headers, timeout=10, allow_redirects=True)
-            return response_final.url
-            
-    except Exception as e:
-        logger.debug(f"⚠️ Ошибка разрешения короткой ссылки: {e}")
-        return short_url
-
-async def search_videos_by_hashtag(song_name, song_id, max_results=50):
-    """Дополнительный поиск по хештегам"""
+async def parse_html_for_videos(html_content, song_id):
+    """Парсинг HTML страницы для поиска видео"""
     videos = []
     
     try:
-        # Создаем хештеги на основе названия песни
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Ищем JSON данные в script тегах
+        script_tags = soup.find_all('script', {'type': 'application/json'})
+        for script in script_tags:
+            try:
+                data = json.loads(script.string)
+                videos.extend(extract_videos_from_api_data(data, song_id))
+            except:
+                continue
+        
+        # Ищем ссылки на видео
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href']
+            if '/video/' in href or '/@' in href:
+                video_url = href if href.startswith('http') else f'https://www.tiktok.com{href}'
+                video_data = {
+                    'url': video_url,
+                    'description': 'Видео с TikTok',
+                    'author_username': 'unknown',
+                    'author_name': 'TikTok пользователь',
+                    'created_at': datetime.now()
+                }
+                videos.append(video_data)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка парсинга HTML: {e}")
+    
+    return videos
+
+async def search_videos_by_hashtag(song_name, song_id, max_results=20):
+    """Поиск видео по хештегам связанным с песней"""
+    videos = []
+    
+    try:
+        # Создаем релевантные хештеги
         hashtags = [
-            f"#{song_name.replace(' ', '')}",
-            f"#{song_id}",
-            f"#music{song_id}",
-            f"#sound{song_id}"
+            song_name.lower().replace(' ', ''),
+            f"music{song_id}",
+            f"song{song_id}",
+            "тренд",
+            "вирус"
         ]
         
         for hashtag in hashtags:
             if len(videos) >= max_results:
                 break
                 
-            search_url = f"https://www.tiktok.com/tag/{hashtag.replace('#', '')}"
-            logger.info(f"🔍 Ищем по хештегу: {hashtag}")
+            search_url = f"https://www.tiktok.com/tag/{hashtag}"
+            logger.info(f"🔍 Ищем по хештегу: #{hashtag}")
             
-            try:
-                headers = get_tiktok_headers()
-                response = requests.get(search_url, headers=headers, timeout=20)
-                
-                if response.status_code == 200:
-                    # Ищем ссылки на видео в результатах поиска
-                    video_matches = re.findall(r'href="(/@[^/]+/(video|photo)/\d+)"', response.text)
-                    
-                    for match in video_matches:
-                        if len(videos) >= max_results:
-                            break
-                            
-                        video_path = match[0]
-                        video_url = f"https://www.tiktok.com{video_path}"
-                        
-                        video_data = await extract_video_info(video_url)
-                        if video_data and not any(v['url'] == video_data['url'] for v in videos):
-                            videos.append(video_data)
-                
-                await asyncio.sleep(1)  # Задержка между запросами
-                
-            except Exception as e:
-                logger.debug(f"⚠️ Ошибка поиска по хештегу {hashtag}: {e}")
-                continue
-                
+            response = await make_tiktok_request(search_url)
+            if response:
+                videos.extend(await parse_html_for_videos(response.text, song_id))
+            
+            await asyncio.sleep(3)  # Пауза между запросами
+            
     except Exception as e:
         logger.error(f"❌ Ошибка поиска по хештегам: {e}")
     
     return videos
 
-async def get_videos_for_song(song_url, song_id, song_name, max_results=100):
+async def get_videos_for_song(song_url, song_id, song_name, max_results=50):
     """Основная функция получения видео для песни"""
     all_videos = []
     
     try:
-        logger.info(f"🎵 Начинаем поиск видео для песни: {song_name} (ID: {song_id})")
+        logger.info(f"🎵 Начинаем реальный поиск видео для: {song_name}")
         
-        # 1. Парсим страницу песни
-        page_videos = await parse_song_page(song_url, max_results//2)
-        all_videos.extend(page_videos)
-        logger.info(f"📄 На странице песни найдено: {len(page_videos)} видео")
+        # 1. Парсинг через API
+        logger.info("🔧 Метод 1: Парсинг через API...")
+        api_videos = await parse_tiktok_api(song_id, max_results//2)
+        all_videos.extend(api_videos)
+        logger.info(f"✅ API найдено: {len(api_videos)} видео")
         
         # 2. Поиск по хештегам
+        logger.info("🔧 Метод 2: Поиск по хештегам...")
         hashtag_videos = await search_videos_by_hashtag(song_name, song_id, max_results//2)
-        # Убираем дубликаты
+        # Убираем дубликаты по URL
         for video in hashtag_videos:
             if not any(v['url'] == video['url'] for v in all_videos):
                 all_videos.append(video)
-        logger.info(f"🏷️ По хештегам найдено: {len(hashtag_videos)} видео")
+        logger.info(f"✅ Хештеги найдено: {len(hashtag_videos)} видео")
         
-        # 3. Ограничиваем количество результатов
-        all_videos = all_videos[:max_results]
+        # 3. Если видео мало, пробуем дополнительные методы
+        if len(all_videos) < 10:
+            logger.info("🔧 Метод 3: Дополнительный поиск...")
+            # Пробуем поисковую страницу
+            search_url = f"https://www.tiktok.com/search?q={song_name}"
+            response = await make_tiktok_request(search_url)
+            if response:
+                search_videos = await parse_html_for_videos(response.text, song_id)
+                for video in search_videos:
+                    if not any(v['url'] == video['url'] for v in all_videos):
+                        all_videos.append(video)
+                logger.info(f"✅ Поиск найдено: {len(search_videos)} видео")
         
-        logger.info(f"✅ Всего найдено видео для песни {song_name}: {len(all_videos)}")
+        # Убираем дубликаты и ограничиваем количество
+        unique_videos = []
+        seen_urls = set()
+        
+        for video in all_videos:
+            if video['url'] not in seen_urls:
+                seen_urls.add(video['url'])
+                unique_videos.append(video)
+        
+        logger.info(f"🎉 Всего найдено уникальных видео: {len(unique_videos)}")
+        
+        return unique_videos[:max_results]
         
     except Exception as e:
-        logger.error(f"❌ Ошибка поиска видео для песни: {e}")
-    
-    return all_videos
+        logger.error(f"❌ Ошибка реального поиска видео: {e}")
+        return []
 
 async def process_song_link(user_id, song_url, progress_callback=None):
-    """Обработка ссылки на песню - с поиском ВСЕХ существующих видео"""
+    """Обработка ссылки на песню с реальным парсингом"""
     try:
-        # Проверяем валидность ссылки
+        if progress_callback:
+            await progress_callback("🔍 Проверяю ссылку...")
+        
         if not any(domain in song_url for domain in ['tiktok.com', 'vm.tiktok.com']):
             return False, "❌ Неверный формат ссылки. Используйте ссылку на песню из TikTok."
         
-        # Извлекаем информацию о песне
         if progress_callback:
-            await progress_callback("🔍 Извлекаю информацию о песне из ссылки...")
+            await progress_callback("🔍 Извлекаю информацию о песне...")
         
         song_name, song_id = extract_song_info_from_url(song_url)
         if not song_name or not song_id:
-            return False, "❌ Не удалось распознать песню из ссылки. Проверьте формат ссылки."
+            return False, "❌ Не удалось распознать песню. Проверьте ссылку."
         
         # Добавляем песню в базу
         song_db_id, is_new = add_song(user_id, song_name, song_url, song_id)
         
         if not is_new:
-            return False, "❌ Эта песня уже добавлена для отслеживания."
-        
-        # 🔍 НАХОДИМ ВСЕ СУЩЕСТВУЮЩИЕ ВИДЕО ПРИ ДОБАВЛЕНИИ
-        if progress_callback:
-            await progress_callback("🔍 Ищу все существующие видео... Это может занять время.")
-        
-        videos = await get_videos_for_song(song_url, song_id, song_name, max_results=100)
+            return False, "❌ Эта песня уже добавлена."
         
         if progress_callback:
-            await progress_callback(f"📹 Найдено {len(videos)} видео. Сохраняю в базу...")
+            await progress_callback("🔍 Начинаю реальный поиск видео...")
         
-        # Сохраняем найденные видео
+        # Реальный поиск видео
+        videos = await get_videos_for_song(song_url, song_id, song_name, 30)
+        
+        if progress_callback:
+            await progress_callback(f"📹 Найдено {len(videos)} видео. Сохраняю...")
+        
+        # Сохраняем видео
         saved_count = 0
         for i, video in enumerate(videos):
             if add_video(song_db_id, video):
                 saved_count += 1
             
-            # Обновляем прогресс каждые 10 видео
-            if progress_callback and i % 10 == 0:
+            if progress_callback and i % 5 == 0 and i > 0:
                 await progress_callback(f"📹 Сохранено {saved_count} из {len(videos)} видео...")
         
         update_song_last_checked(song_db_id)
         
         if saved_count > 0:
-            return True, f"✅ Песня '{song_name}' добавлена!\n\n📊 Найдено и сохранено {saved_count} существующих видео!\n\nТеперь я буду присылать уведомления только о новых видео!"
+            return True, f"✅ **{song_name}** добавлена!\n\n🎵 **Найдено видео: {saved_count}**\n\n📊 Теперь я буду отслеживать новые видео с этой песней!\n\n💡 *Реальный парсинг TikTok*"
         else:
-            return True, f"✅ Песня '{song_name}' добавлена!\n\n📭 Пока видео не найдено, но я буду проверять новые!\n\nПопробуйте нажать '🔍 Проверить сейчас' для поиска."
+            return True, f"✅ **{song_name}** добавлена!\n\n📭 Видео пока не найдено.\n\n🔄 Попробуйте проверить позже или использовать поиск."
         
     except Exception as e:
         logger.error(f"❌ Ошибка обработки ссылки: {e}")
-        return False, "❌ Произошла ошибка при обработке ссылки."
+        return False, f"❌ Ошибка: {str(e)}"
 
 async def check_new_videos_for_user(user_id):
-    """Проверка только НОВЫХ видео для пользователя"""
+    """Проверка новых видео с реальным парсингом"""
     new_videos = []
     
     try:
@@ -624,9 +679,10 @@ async def check_new_videos_for_user(user_id):
         for song in songs:
             song_db_id, name, song_url, song_id, created_at, last_checked = song
             
-            logger.info(f"🔍 Проверяем новые видео для песни: {name} (ID: {song_id})")
+            logger.info(f"🔍 Проверяем новые видео для: {name}")
             
-            videos = await get_videos_for_song(song_url, song_id, name, max_results=50)
+            # Реальный поиск новых видео
+            videos = await get_videos_for_song(song_url, song_id, name, 20)
             
             for video in videos:
                 if not get_video_exists(video['url']):
@@ -635,23 +691,22 @@ async def check_new_videos_for_user(user_id):
                             'song_name': name,
                             'video_url': video['url'],
                             'description': video['description'],
-                            'author': video.get('author_username', 'Неизвестный автор')
+                            'author': video.get('author_name', video.get('author_username', 'Неизвестный автор'))
                         })
-                        logger.info(f"🎉 Найдено новое видео для песни {name}")
+                        logger.info(f"🎉 Новое видео для {name}")
             
             update_song_last_checked(song_db_id)
         
     except Exception as e:
-        logger.error(f"❌ Ошибка проверки видео для пользователя {user_id}: {e}")
+        logger.error(f"❌ Ошибка проверки видео: {e}")
     
     return new_videos
 
 async def search_more_videos_for_song(song_id, song_name, user_id):
-    """Поиск дополнительных видео для конкретной песни"""
+    """Дополнительный поиск видео для песни"""
     try:
-        logger.info(f"🔍 Дополнительный поиск видео для песни: {song_name}")
+        logger.info(f"🔍 Дополнительный поиск для: {song_name}")
         
-        # Получаем информацию о песне
         songs = get_user_songs(user_id)
         song_info = next((s for s in songs if s[0] == song_id), None)
         
@@ -661,7 +716,8 @@ async def search_more_videos_for_song(song_id, song_name, user_id):
         song_url = song_info[2]
         song_id_str = song_info[3]
         
-        videos = await get_videos_for_song(song_url, song_id_str, song_name, max_results=30)
+        # Реальный поиск дополнительных видео
+        videos = await get_videos_for_song(song_url, song_id_str, song_name, 15)
         
         new_videos_count = 0
         for video in videos:
@@ -674,8 +730,10 @@ async def search_more_videos_for_song(song_id, song_name, user_id):
         return new_videos_count
         
     except Exception as e:
-        logger.error(f"❌ Ошибка дополнительного поиска видео: {e}")
+        logger.error(f"❌ Ошибка дополнительного поиска: {e}")
         return 0
+
+
 
 # ========== ОБРАБОТЧИКИ БОТА ==========
 
