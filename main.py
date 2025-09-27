@@ -878,7 +878,7 @@ async def check_now_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i, video in enumerate(new_videos[:5], 1):
                 text += f"**{i}. {video['song_name']}**\n"
                 text += f"📹 {video['description']}\n"
-                                text += f"👤 {video.get('author', 'Неизвестный автор')}\n"
+                text += f"👤 {video.get('author', 'Неизвестный автор')}\n"  # ← ИСПРАВЛЕН ОТСТУП
                 text += f"🔗 [Смотреть видео]({video['video_url']})\n\n"
             
             if len(new_videos) > 5:
